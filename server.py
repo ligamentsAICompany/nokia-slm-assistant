@@ -31,8 +31,10 @@ try:
         should_attempt_derived_answer,
         generate_derived_answer_context,
         format_derived_response,
+        validate_derived_response,
         DERIVED_ANSWER_SYSTEM_PROMPT,
-        DERIVED_REFUSAL_MESSAGE
+        DERIVED_REFUSAL_MESSAGE,
+        DERIVED_UI_BANNER
     )
     DERIVED_KNOWLEDGE_AVAILABLE = True
 except ImportError:
@@ -189,18 +191,13 @@ NOKIA_COMMAND_KEYWORDS = {
 }
 
 
-def validate_derived_response(response_text: str) -> bool:
+def validate_nokia_context(response_text: str) -> bool:
     """
-    Hard safety check for derived configuration responses.
-    Returns True if response contains at least 1 Nokia entity AND 1 command keyword.
-    This ensures we're not returning generic/hallucinated content.
+    Hard safety check for responses.
+    Returns True if response contains at least 1 Nokia entity.
     """
     response_lower = response_text.lower()
-    
-    has_entity = any(entity in response_lower for entity in NOKIA_ENTITIES)
-    has_command = any(cmd in response_lower for cmd in NOKIA_COMMAND_KEYWORDS)
-    
-    return has_entity and has_command
+    return any(entity in response_lower for entity in NOKIA_ENTITIES)
 
 
 def classify_response_type(response_text: str) -> str:
@@ -305,81 +302,66 @@ def chat():
         
         # DERIVED KNOWLEDGE LAYER: Intercept refusals for implicit concepts
         if "INSUFFICIENT DOCUMENTATION CONTEXT" in context:
-            # Check if derived answer is possible
-            derived_attempted = False
-            
             if DERIVED_KNOWLEDGE_AVAILABLE:
-                should_derive, coverage, derive_reason = should_attempt_derived_answer(
+                should_use_dcal, coverage, reason = should_attempt_derived_answer(
                     query=user_query,
                     query_type=query_type.value,
                     context=context,
                     metadata_store=backend.metadata_store
                 )
                 
-                if should_derive and coverage:
-                    # Generate derived answer
-                    logger.info(f"[DERIVED] Attempting derived answer: {derive_reason}")
+                if should_use_dcal:
+                    logger.info(f"[DCAL] Attempting derived answer: {reason}")
                     derived_context = generate_derived_answer_context(coverage)
                     
-                    # Use special derived answer prompt
-                    derived_prompt = DERIVED_ANSWER_SYSTEM_PROMPT.format(
-                        concept=coverage.concept,
-                        derived_context=derived_context,
-                        query=user_query
-                    )
-                    
                     messages = [
-                        {"role": "system", "content": derived_prompt},
+                        {
+                            "role": "system", 
+                            "content": DERIVED_ANSWER_SYSTEM_PROMPT.format(
+                                concept=coverage.concept,
+                                derived_context=derived_context,
+                                query=user_query
+                            )
+                        },
                         {"role": "user", "content": user_query}
                     ]
                     
                     # Generate derived response
-                    derived_response = backend.generate_response(messages, query_type)
+                    raw_response = backend.generate_response(messages, query_type)
                     
-                    if "SYSTEM_ERROR" not in derived_response:
-                        # Format with derived answer labels
-                        formatted_response = format_derived_response(derived_response, coverage)
-                        
-                        if trace:
-                            trace.response_grounded = True
-                            trace.complete()
-                        
-                        return jsonify({
-                            "response": formatted_response,
-                            "query_type": query_type.value,
-                            "response_type": "derived",
-                            "grounded": True,
-                            "confidence": "derived",
-                            "status": "derived_explanation",
-                            "derived_info": {
-                                "concept": coverage.concept,
-                                "chunk_count": coverage.chunk_count,
-                                "page_count": coverage.page_count
-                            },
-                            "context_preview": "Derived from implicit documentation references.",
-                            "latency_ms": round((time.time() - start_time) * 1000, 1)
-                        })
+                    # POST-GENERATION VALIDATION (Speculation words, CLI patterns)
+                    is_valid, violations = validate_derived_response(raw_response)
+                    if not is_valid:
+                        logger.warning(f"[DCAL] Validation failed: {violations}")
+                        return _refuse_chat(context, query_type, start_time, trace)
                     
-                    derived_attempted = True
-                    logger.warning(f"[DERIVED] LLM failed for derived answer, falling back to refusal")
-                else:
-                    logger.info(f"[DERIVED] Not eligible: {derive_reason}")
-            
-            # Standard refusal if derived answer not possible
-            if trace:
-                trace.refusal = True
-                trace.refusal_code = "RETRIEVAL_REFUSED"
-                trace.complete()
-            
-            return jsonify({
-                "response": context,
-                "query_type": query_type.value,
-                "response_type": "refusal",
-                "grounded": False,
-                "confidence": "refusal",
-                "context_preview": "Refused due to insufficient context.",
-                "latency_ms": round((time.time() - start_time) * 1000, 1)
-            })
+                    # Ensure it contains at least some Nokia context
+                    if not validate_nokia_context(raw_response):
+                        logger.warning(f"[DCAL] Nokia context check failed")
+                        return _refuse_chat(context, query_type, start_time, trace)
+
+                    formatted_response = format_derived_response(raw_response, coverage)
+                    
+                    if trace:
+                        trace.response_grounded = True
+                        trace.complete()
+                    
+                    return jsonify({
+                        "response": formatted_response,
+                        "query_type": query_type.value,
+                        "response_type": "derived",
+                        "status": "derived_explanation",
+                        "ui_banner": DERIVED_UI_BANNER,
+                        "derived_info": {
+                            "concept": coverage.concept,
+                            "chunk_count": coverage.chunk_count,
+                            "page_count": coverage.page_count
+                        },
+                        "latency_ms": round((time.time() - start_time) * 1000, 1)
+                    })
+
+            # Standard refusal if DCAL not used/available
+            return _refuse_chat(context, query_type, start_time, trace)
 
         # 2. Select Dynamic System Prompt based on Query Type
         system_prompt = SYSTEM_PROMPTS.get(query_type, SYSTEM_PROMPTS[QueryType.GENERAL])
@@ -475,6 +457,24 @@ def chat():
             "status": "error",
             "latency_ms": round((time.time() - start_time) * 1000, 1)
         }), 500
+
+
+def _refuse_chat(context, query_type, start_time, trace):
+    """Helper for refusal responses."""
+    if trace:
+        trace.refusal = True
+        trace.refusal_code = "RETRIEVAL_REFUSED"
+        trace.complete()
+    
+    return jsonify({
+        "response": context,
+        "query_type": query_type.value,
+        "response_type": "refusal",
+        "grounded": False,
+        "confidence": "refusal",
+        "context_preview": "Refused due to insufficient context.",
+        "latency_ms": round(float(time.time() - start_time) * 1000, 1)
+    })
 
 
 @app.route('/api/cache/clear', methods=['POST'])

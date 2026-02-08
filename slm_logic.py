@@ -64,6 +64,19 @@ except ImportError:
     OPTIMIZATIONS_AVAILABLE = False
     print("[WARN] Optimizations module not found - using basic mode")
 
+# Import derived knowledge layer functions
+try:
+    from derived_knowledge import (
+        should_attempt_derived_answer,
+        generate_derived_answer_context,
+        format_derived_response,
+        validate_derived_response,
+        DERIVED_ANSWER_SYSTEM_PROMPT
+    )
+    DERIVED_KNOWLEDGE_AVAILABLE = True
+except ImportError:
+    DERIVED_KNOWLEDGE_AVAILABLE = False
+
 # FastEmbed for embeddings (no TensorFlow dependency!)
 FastEmbedder = None
 
