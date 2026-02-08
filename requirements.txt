@@ -1,0 +1,44 @@
+# Nokia SLM Assistant - Requirements
+# ==================================
+# Production dependencies for the Nokia SLM system
+
+# === Core Web Framework ===
+flask>=2.0.0
+
+# === Vector Search ===
+faiss-cpu>=1.7.4
+fastembed>=0.2.0
+
+# === NLP & ML ===
+sentence-transformers>=2.2.0
+rank-bm25>=0.2.2
+
+# === Graph ===
+networkx>=3.0
+
+# === PDF Processing ===
+pymupdf>=1.23.0
+
+# === HTTP Client ===
+requests>=2.28.0
+
+# === Data & Utilities ===
+numpy>=1.24.0
+pandas>=2.0.0
+
+# === Configuration ===
+python-dotenv>=1.0.0
+
+# === Logging & Observability ===
+# (Using stdlib logging, no additional deps needed)
+
+# === Testing ===
+pytest>=7.0.0
+# pytest-cov removed due to coverage package conflict
+
+# === Type Checking (Optional) ===
+# mypy>=1.0.0
+
+# === Development (Optional) ===
+# black>=23.0.0
+# isort>=5.12.0

@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Nokia SLM Assistant - Enterprise AI for GPON/ONT Documentation">
+    <title>Nokia SLM Assistant</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <div class="logo-section">
+                    <div class="logo">
+                        <svg viewBox="0 0 40 40" class="logo-icon">
+                            <circle cx="20" cy="20" r="18" fill="none" stroke="currentColor" stroke-width="2"/>
+                            <path d="M12 20 L20 12 L28 20 L20 28 Z" fill="currentColor"/>
+                        </svg>
+                        <span class="logo-text">Nokia SLM</span>
+                    </div>
+                    <span class="version-badge">v5.0</span>
+                </div>
+                <div class="status-section">
+                    <div class="status-indicator" id="status-indicator">
+                        <span class="status-dot"></span>
+                        <span class="status-text">Connecting...</span>
+                    </div>
+                    <button class="btn-icon" id="settings-btn" title="System Status">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="3"/>
+                            <path d="M12 1v6m0 6v6m11-7h-6m-6 0H1m15.5-7.5l-4.2 4.2m-4.6 4.6l-4.2 4.2m0-13l4.2 4.2m4.6 4.6l4.2 4.2"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Chat Messages -->
+            <div class="chat-container" id="chat-container">
+                <div class="welcome-message">
+                    <div class="welcome-icon">
+                        <svg viewBox="0 0 48 48" fill="none">
+                            <circle cx="24" cy="24" r="22" stroke="currentColor" stroke-width="2" opacity="0.3"/>
+                            <path d="M24 14v10l7 7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                            <circle cx="24" cy="24" r="3" fill="currentColor"/>
+                        </svg>
+                    </div>
+                    <h1>Nokia SLM Assistant</h1>
+                    <p>Enterprise-grade AI for Nokia GPON/ONT Documentation</p>
+                    <div class="quick-actions">
+                        <button class="quick-action" data-query="What is GPON?">
+                            <span class="qa-icon">📖</span>
+                            What is GPON?
+                        </button>
+                        <button class="quick-action" data-query="How to configure T-CONT?">
+                            <span class="qa-icon">⚙️</span>
+                            Configure T-CONT
+                        </button>
+                        <button class="quick-action" data-query="Troubleshoot LOS alarm on ONT">
+                            <span class="qa-icon">🔧</span>
+                            Troubleshoot LOS
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Input Section -->
+            <div class="input-section">
+                <div class="input-container">
+                    <textarea 
+                        id="query-input" 
+                        placeholder="Ask about Nokia GPON/ONT documentation..."
+                        rows="1"
+                        maxlength="10000"
+                    ></textarea>
+                    <button class="send-btn" id="send-btn" title="Send Message">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
+                        </svg>
+                    </button>
+                </div>
+                <div class="input-footer">
+                    <span class="char-count" id="char-count">0 / 10000</span>
+                    <span class="model-info" id="model-info">Loading...</span>
+                </div>
+            </div>
+        </main>
+
+        <!-- Status Modal -->
+        <div class="modal" id="status-modal">
+            <div class="modal-backdrop"></div>
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>System Status</h2>
+                    <button class="modal-close" id="modal-close">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div class="status-grid" id="status-grid">
+                        <div class="status-card">
+                            <div class="status-card-icon">📊</div>
+                            <div class="status-card-label">Vectors</div>
+                            <div class="status-card-value" id="stat-vectors">-</div>
+                        </div>
+                        <div class="status-card">
+                            <div class="status-card-icon">📄</div>
+                            <div class="status-card-label">Chunks</div>
+                            <div class="status-card-value" id="stat-chunks">-</div>
+                        </div>
+                        <div class="status-card">
+                            <div class="status-card-icon">🤖</div>
+                            <div class="status-card-label">Model</div>
+                            <div class="status-card-value" id="stat-model">-</div>
+                        </div>
+                        <div class="status-card">
+                            <div class="status-card-icon">🔍</div>
+                            <div class="status-card-label">BM25</div>
+                            <div class="status-card-value" id="stat-bm25">-</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
