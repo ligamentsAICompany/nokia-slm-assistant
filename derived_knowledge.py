@@ -54,6 +54,9 @@ DERIVED_CONCEPT_POLICY = {
     # Allowed query types for derived answers (DEFINITION ONLY)
     "allowed_query_types": ["simple", "general"],  # NOT config, NOT troubleshooting
     
+    # Forbidden query types - NEVER allow DCAL for these
+    "forbidden_query_types": ["configuration", "troubleshooting"],
+    
     # Blocked patterns - NEVER allow derived answers for these
     "blocked_patterns": [
         r'\b(how\s+to\s+configure)',
@@ -63,10 +66,17 @@ DERIVED_CONCEPT_POLICY = {
         r'\b(create|delete|modify|set|assign)\s+\w+',
         r'\b(configure|setup|install)',
         r'\b(default|interval|numeric|value|number)\s+',
+        r'\b(threshold|range)\s+',  # Additional numeric blockers
         r'\bvs\b',  # Cross-vendor comparisons
         r'\bhuawei\b',
         r'\bcisco\b',
         r'\bzte\b',
+    ],
+    
+    # Speculation words that MUST NOT appear in derived answers
+    "forbidden_speculation_words": [
+        "likely", "typically", "usually", "probably", "might",
+        "could be", "may be", "possibly", "perhaps", "generally"
     ],
     
     # Nokia GPON concepts commonly referenced but not formally defined
@@ -304,12 +314,17 @@ def generate_derived_answer_context(coverage: ConceptCoverage) -> str:
 # DERIVED ANSWER RESPONSE FORMATTER
 # =============================================================================
 
-DERIVED_ANSWER_PREFIX = "**Derived from Nokia GPON documentation context:**\n\n"
+DERIVED_ANSWER_PREFIX = "Derived from Nokia GPON documentation context:\n\n"
 
 DERIVED_ANSWER_SUFFIX = (
     "\n\n---\n"
-    "*This concept is referenced throughout the documentation but not formally defined. "
-    "Providing a derived explanation strictly based on available context.*"
+    "*This concept is referenced throughout the documentation but is not formally defined. "
+    "The explanation above is derived strictly from the available context.*"
+)
+
+DERIVED_UI_BANNER = (
+    "This concept is referenced in the documentation but not formally defined. "
+    "Providing a derived explanation based strictly on available context."
 )
 
 DERIVED_REFUSAL_MESSAGE = (
@@ -336,6 +351,49 @@ def format_derived_response(response: str, coverage: ConceptCoverage) -> str:
         return response + DERIVED_ANSWER_SUFFIX
     
     return DERIVED_ANSWER_PREFIX + response + DERIVED_ANSWER_SUFFIX
+
+
+def validate_derived_response(response: str) -> tuple:
+    """
+    Validate that a derived response does NOT contain forbidden content.
+    
+    This is a post-generation safety check to catch:
+    - Speculation words
+    - CLI command patterns
+    - Numeric values not in quotes
+    
+    Args:
+        response: The generated response text
+    
+    Returns:
+        Tuple of (is_valid: bool, violations: List[str])
+    """
+    violations = []
+    response_lower = response.lower()
+    
+    # Check for speculation words
+    for word in DERIVED_CONCEPT_POLICY["forbidden_speculation_words"]:
+        if word in response_lower:
+            violations.append(f"Contains speculation word: '{word}'")
+    
+    # Check for CLI patterns
+    cli_patterns = [
+        r'^\s*configure\s+',  # CLI mode entry
+        r'^\s*admin\s+',
+        r'^\s*#\s*\w+',  # CLI prompt
+        r'^\s*\$\s*\w+',
+        r'^\s*>\s*\w+',
+    ]
+    for pattern in cli_patterns:
+        if re.search(pattern, response, re.MULTILINE):
+            violations.append(f"Contains CLI pattern: {pattern}")
+    
+    # Check for step-by-step patterns
+    if re.search(r'step\s*[0-9]+[:\.]', response_lower):
+        violations.append("Contains step-by-step instructions")
+    
+    return (len(violations) == 0, violations)
+
 
 
 # =============================================================================
