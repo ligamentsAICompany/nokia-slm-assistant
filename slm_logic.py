@@ -368,8 +368,18 @@ class SLMBackend:
             r = requests.get(f"{LM_STUDIO_URL}/models", timeout=5)
             if r.status_code == 200:
                 models = r.json().get("data", [])
-                if models:
-                    return models[0].get("id", "local-model")
+                model_ids = [m.get("id") for m in models if m.get("id")]
+                
+                # Check for preferred model: nvidia/nemotron-3-nano
+                preferred = "nvidia/nemotron-3-nano"
+                if preferred in model_ids:
+                    print(f"[INFO] Preferred model found: {preferred}")
+                    return preferred
+                
+                # Fallback to first available if preferred not found
+                if model_ids:
+                    logger.warning(f"[WARN] Preferred model {preferred} not found on DGX. Using: {model_ids[0]}")
+                    return model_ids[0]
         except Exception as e:
             print(f"[WARN] Model Detection Failed: {e}")
         return "local-model"
