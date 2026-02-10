@@ -233,7 +233,7 @@ def status():
         "model": backend.active_model[:30] + "..." if len(backend.active_model) > 30 else backend.active_model,
         "bm25_enabled": bool(backend.bm25),
         "cross_encoder_enabled": bool(backend.cross_encoder),
-        "graph_enabled": bool(backend.graph)
+        "graph_enabled": bool(getattr(backend, 'neo4j_conn', None))
     })
 
 

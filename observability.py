@@ -403,6 +403,26 @@ class HealthChecker:
         except Exception as e:
             return False, str(e)
     
+    @staticmethod
+    def check_neo4j(uri: str = None, timeout: float = 5.0) -> Tuple[bool, str]:
+        """Check if Neo4j is reachable."""
+        try:
+            import os
+            from dotenv import load_dotenv
+            load_dotenv()
+            neo_uri = uri or os.environ.get("NEO4J_URI", "bolt://localhost:7687")
+            neo_user = os.environ.get("NEO4J_USER", "neo4j")
+            neo_pass = os.environ.get("NEO4J_PASSWORD", "neo4j")
+            from neo4j import GraphDatabase
+            driver = GraphDatabase.driver(neo_uri, auth=(neo_user, neo_pass))
+            with driver.session() as session:
+                result = session.run("RETURN 1 AS ok")
+                result.single()
+            driver.close()
+            return True, "Neo4j available"
+        except Exception as e:
+            return False, str(e)
+
     @classmethod
     def run_all_checks(cls, config) -> HealthStatus:
         """Run all health checks."""
@@ -423,6 +443,12 @@ class HealthChecker:
         ollama_ok, ollama_msg = cls.check_ollama(config.ollama_url)
         checks["ollama"] = ollama_ok
         details["ollama"] = ollama_msg
+        
+        # Neo4j check
+        neo4j_uri = getattr(config, "neo4j_uri", None)
+        neo4j_ok, neo4j_msg = cls.check_neo4j(neo4j_uri)
+        checks["neo4j"] = neo4j_ok
+        details["neo4j"] = neo4j_msg
         
         # Determine overall status
         critical_checks = [checks.get("faiss_index", False)]

@@ -58,7 +58,7 @@ logger = logging.getLogger(__name__)
 
 # Import optimizations module
 try:
-    from optimizations import SLMOptimizer, ContextWindowManager, LatencyOptimizer
+    from optimizations import SLMOptimizer, ContextWindowManager, LatencyOptimizer, GraphMaintenance
     OPTIMIZATIONS_AVAILABLE = True
 except ImportError:
     OPTIMIZATIONS_AVAILABLE = False
@@ -112,8 +112,16 @@ except ImportError:
     BM25Okapi = None
     print("[WARN] rank_bm25 not installed")
 
-# Neo4j import with error handling
-import networkx as nx
+# Neo4j graph integration
+try:
+    from neo4j_graph import (
+        get_connection, init_graph, graph_search_for_query,
+        get_graph_stats as neo4j_get_graph_stats, Neo4jConnection
+    )
+    NEO4J_GRAPH_AVAILABLE = True
+except ImportError:
+    NEO4J_GRAPH_AVAILABLE = False
+
 from enum import Enum
 import re
 
@@ -258,7 +266,6 @@ if CONFIG:
     BASE_DIR = CONFIG.data_dir
     FAISS_INDEX_PATH = str(CONFIG.get_faiss_index_path())
     FAISS_META_PATH = str(CONFIG.get_metadata_path())
-    GRAPH_PATH = str(CONFIG.get_graph_path())
     LM_STUDIO_URL = CONFIG.lm_studio_url
 else:
     # Fallback to environment variables or defaults
@@ -266,7 +273,6 @@ else:
     BASE_DIR = os.environ.get("SLM_DATA_DIR", "./data")
     FAISS_INDEX_PATH = os.path.join(BASE_DIR, "nokia_vector_index.faiss")
     FAISS_META_PATH = os.path.join(BASE_DIR, "nokia_vector_meta.pkl")
-    GRAPH_PATH = os.path.join(BASE_DIR, "nokia_graph.gml")
     LM_STUDIO_URL = os.environ.get("LM_STUDIO_URL", "http://localhost:8103/v1")
 
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -282,7 +288,7 @@ class SLMBackend:
         self.metadata_store = []
         self.bm25 = None           # v3.0
         self.bm25_corpus = []      # v3.0
-        self.graph = None # NetworkX Graph
+        self.neo4j_conn = None  # Neo4j connection
         self.active_model = "local-model"
         
         # Optimization components
@@ -332,17 +338,23 @@ class SLMBackend:
         else:
             print("[WARN] FAISS index not found!")
             
-        # 3. Load Knowledge Graph (NetworkX)
-        if os.path.exists(GRAPH_PATH):
+        # 3. Connect to Neo4j Knowledge Graph
+        if NEO4J_GRAPH_AVAILABLE:
             try:
-                self.graph = nx.read_gml(GRAPH_PATH)
-                print(f"[OK] Loaded Knowledge Graph ({self.graph.number_of_nodes()} nodes)")
+                if init_graph():
+                    self.neo4j_conn = get_connection()
+                    stats = neo4j_get_graph_stats(self.neo4j_conn)
+                    total = stats.get('total_nodes', 0)
+                    print(f"[OK] Neo4j Knowledge Graph connected ({total} nodes)")
+                else:
+                    print("[WARN] Neo4j graph init failed")
+                    self.neo4j_conn = None
             except Exception as e:
-                print(f"[WARN] Graph load failed: {e}")
-                self.graph = None
+                print(f"[WARN] Neo4j connection failed: {e}")
+                self.neo4j_conn = None
         else:
-            print("[WARN] Local Graph file not found")
-            self.graph = None
+            print("[WARN] neo4j_graph module not available")
+            self.neo4j_conn = None
             
         # 4. Get Model
         self.active_model = self._get_active_model()
@@ -354,10 +366,10 @@ class SLMBackend:
             self.context_manager = self.optimizer.context_manager
             self.latency_optimizer = self.optimizer.latency
             
-            # Start background maintenance (every 24 hours)
-            if self.graph:
-                # NetworkX graph is in-memory, no maintenance driver needed
-                pass
+            # Start background maintenance for Neo4j graph
+            if self.neo4j_conn and self.neo4j_conn.connected:
+                self.optimizer.graph_maintenance = GraphMaintenance(self.neo4j_conn.driver)
+                self.optimizer.start_maintenance_scheduler(interval_hours=24)
             
             print("[OK] Optimizations loaded (context management, caching, graph maintenance)")
         else:
@@ -571,7 +583,7 @@ class SLMBackend:
         # Define allowed retrieval methods (Strict Routing - Req #6)
         allow_vector = query_type in [QueryType.LOG_ANALYSIS, QueryType.CONFIGURATION, QueryType.TROUBLESHOOTING, QueryType.SIMPLE, QueryType.GENERAL]
         allow_bm25 = query_type in [QueryType.TROUBLESHOOTING, QueryType.SIMPLE, QueryType.GENERAL, QueryType.CONFIGURATION, QueryType.LOG_ANALYSIS]
-        allow_graph = query_type == QueryType.LOG_ANALYSIS
+        allow_graph = query_type in [QueryType.SIMPLE, QueryType.TROUBLESHOOTING, QueryType.LOG_ANALYSIS, QueryType.GENERAL]
         
         # 4. Hybrid Search
         candidates_vector = []
@@ -608,13 +620,17 @@ class SLMBackend:
             candidates_bm25 = self.bm25_search(expanded_query, top_k=bm25_k)
         search_stats['bm25'] = len(candidates_bm25)
         
-        # C. Graph Search (v3.0 Advanced)
+        # C. Neo4j Knowledge Graph Search
         graph_text = ""
-        if allow_graph and self.graph:
-            graph_results = self.advanced_graph_search(expanded_query)
-            if graph_results:
-                graph_text = "\n--- Knowledge Graph Insights ---\n" + graph_results
-            search_stats['graph'] = 1 if graph_text else 0
+        if allow_graph and self.neo4j_conn and self.neo4j_conn.connected:
+            try:
+                graph_results = graph_search_for_query(self.neo4j_conn, expanded_query)
+                if graph_results:
+                    graph_text = "\n" + graph_results
+                search_stats['graph'] = 1 if graph_text else 0
+            except Exception as e:
+                print(f"[WARN] Neo4j graph search error: {e}")
+                search_stats['graph'] = 0
         
         # 5. RRF Fusion (Vector + BM25)
         fused_candidates = self.apply_rrf(candidates_vector, candidates_bm25)
@@ -726,44 +742,14 @@ class SLMBackend:
         print(f"[SEARCH] Stats: {search_stats} | Total Time: {(time.time()-start_time)*1000:.1f}ms")
         return (final_context, query_type)
 
-    def advanced_graph_search(self, query):
-        """v3.0: NetworkX Neighbor Search."""
-        if not self.graph: return None
+    def neo4j_graph_search(self, query: str) -> Optional[str]:
+        """Neo4j Knowledge Graph Search – replaces NetworkX."""
+        if not self.neo4j_conn or not self.neo4j_conn.connected:
+            return None
         try:
-            keywords = [w for w in query.split() if len(w) > 3]
-            results = []
-            
-            # Simple fuzzy finder for nodes
-            # In a real app, maybe use a map or trie
-            nodes_to_search = []
-            query_lower = query.lower()
-            
-            # This is O(N) but N is small (60 nodes)
-            for node in self.graph.nodes(data=True):
-                node_id, data = node
-                # Check node content
-                content = f"{node_id} {data.get('label','')} {data.get('name','')} {data.get('purpose','')}".lower()
-                
-                # If keyword match
-                for kw in keywords:
-                    if kw.lower() in content:
-                        nodes_to_search.append(node_id)
-                        break
-            
-            # Traverse
-            for node_id in nodes_to_search[:3]: # Limit start nodes
-                # Get neighbors
-                neighbors = list(self.graph.neighbors(node_id))
-                
-                # Get info
-                if neighbors:
-                    results.append(f"Entity '{node_id}' is related to: {', '.join(str(n) for n in neighbors[:5])}")
-                else:
-                    results.append(f"Found Entity: '{node_id}'")
-                            
-            return "\n".join(list(set(results))) # Dedupe
+            return graph_search_for_query(self.neo4j_conn, query) or None
         except Exception as e:
-            print(f"[WARN] Graph search error: {e}")
+            print(f"[WARN] Neo4j graph search error: {e}")
             return None
 
 
@@ -963,6 +949,8 @@ class SLMBackend:
     
     def get_graph_stats(self) -> Dict:
         """Get Neo4j graph statistics."""
+        if self.neo4j_conn and self.neo4j_conn.connected:
+            return neo4j_get_graph_stats(self.neo4j_conn)
         if self.optimizer and self.optimizer.graph_maintenance:
             return self.optimizer.graph_maintenance.get_stats()
         return {"enabled": False}
@@ -992,7 +980,7 @@ class SLMBackend:
                 "cross_encoder": bool(self.cross_encoder),
                 "bm25_index": bool(self.bm25),
                 "query_expansion": True,
-                "advanced_graph": bool(self.graph)
+                "neo4j_graph": bool(self.neo4j_conn and self.neo4j_conn.connected)
             }
         }
     
@@ -1003,7 +991,8 @@ class SLMBackend:
         if self.optimizer:
             self.optimizer.shutdown()
         
-        # No driver to close for NetworkX
-            pass
+        # Close Neo4j connection
+        if self.neo4j_conn:
+            self.neo4j_conn.close()
             
         print("[OK] Shutdown complete")

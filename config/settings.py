@@ -73,9 +73,22 @@ class SLMConfig:
         "SLM_METADATA_PATH",
         str(Path(_get_env("SLM_DATA_DIR", "data")) / "nokia_vector_meta.pkl")
     ))
-    graph_path: str = field(default_factory=lambda: _get_env(
-        "SLM_GRAPH_PATH",
-        str(Path(_get_env("SLM_DATA_DIR", "data")) / "nokia_graph.gml")
+    # === Neo4j Configuration ===
+    neo4j_uri: str = field(default_factory=lambda: _get_env(
+        "NEO4J_URI",
+        "bolt://localhost:7687"
+    ))
+    neo4j_user: str = field(default_factory=lambda: _get_env(
+        "NEO4J_USER",
+        "neo4j"
+    ))
+    neo4j_password: str = field(default_factory=lambda: _get_env(
+        "NEO4J_PASSWORD",
+        "neo4j"
+    ))
+    neo4j_database: str = field(default_factory=lambda: _get_env(
+        "NEO4J_DATABASE",
+        "neo4j"
     ))
     query_cache_path: str = field(default_factory=lambda: _get_env(
         "SLM_QUERY_CACHE",
@@ -228,11 +241,9 @@ class SLMConfig:
             return Path(self.metadata_path)
         return Path(self.data_dir) / "nokia_vector_meta.pkl"
     
-    def get_graph_path(self) -> Path:
-        """Get resolved graph path."""
-        if os.path.isabs(self.graph_path):
-            return Path(self.graph_path)
-        return Path(self.data_dir) / "nokia_graph.gml"
+    def get_neo4j_uri(self) -> str:
+        """Get Neo4j connection URI."""
+        return self.neo4j_uri
 
 
 # Global config instance (lazy-loaded)

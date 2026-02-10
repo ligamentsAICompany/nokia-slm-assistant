@@ -59,7 +59,6 @@ def run_full_ingestion(
     # Output paths
     index_path = out_dir / "nokia_vector_index.faiss"
     meta_path = out_dir / "nokia_vector_meta.pkl"
-    graph_path = out_dir / "nokia_graph.gml"
     
     # Check for existing files
     if not force:
@@ -133,16 +132,16 @@ def run_full_ingestion(
     
     stats["vectors"] = indexer.size
     
-    # Step 6: Build knowledge graph (optional)
+    # Step 6: Build knowledge graph in Neo4j (optional)
     if build_graph:
-        logger.info("Building knowledge graph...")
-        graph_builder.process_chunks(all_chunks, show_progress=True)
+        logger.info("Building knowledge graph in Neo4j...")
+        graph_builder.process_chunks(all_chunks, doc_id="nokia_ingestion", show_progress=True)
         graph_builder.add_predefined_relationships()
-        graph_builder.save(str(graph_path))
+        graph_builder.save()  # no-op — Neo4j persists automatically
         
         graph_stats = graph_builder.get_stats()
-        stats["graph_nodes"] = graph_stats["nodes"]
-        stats["graph_edges"] = graph_stats["edges"]
+        stats["graph_nodes"] = graph_stats.get("total_nodes", graph_stats.get("nodes", 0))
+        stats["graph_edges"] = graph_stats.get("total_relationships", graph_stats.get("edges", 0))
     
     stats["duration_seconds"] = round(time.time() - start_time, 2)
     

@@ -1,32 +1,46 @@
 """
-Knowledge Graph Builder
-=======================
-Extracts entities and relationships from text to build a knowledge graph.
+Knowledge Graph Builder (Neo4j)
+===============================
+Extracts entities and relationships from text and persists them into Neo4j.
+Fully replaces the previous NetworkX-based graph builder.
 """
 
 import re
 import logging
-from typing import List, Set, Tuple, Dict, Optional
+import sys
+from typing import List, Set, Tuple, Dict
 from pathlib import Path
 
 from .chunker import ChunkData
+
+# Import Neo4j helpers from the top-level module
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from neo4j_graph import (
+    get_connection, init_graph, ensure_schema,
+    create_concept, create_alarm, create_entity, create_document,
+    relate_concepts, link_concept_to_document, link_alarm_to_entity,
+    link_alarm_to_concept, link_entity_part_of,
+    get_graph_stats as neo4j_get_graph_stats,
+    seed_gpon_knowledge,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class GraphBuilder:
     """
-    Builds a NetworkX knowledge graph from document chunks.
-    
+    Builds a Neo4j knowledge graph from document chunks.
+
     Extracts Nokia-specific entities and relationships using regex patterns.
-    No LLM usage during extraction.
-    
+    All data is persisted directly into Neo4j via Bolt.
+
     Usage:
         builder = GraphBuilder()
-        builder.process_chunks(chunks)
-        builder.save("path/to/graph.gml")
+        builder.process_chunks(chunks, doc_id="my_doc")
+        builder.save()  # no-op – Neo4j is already persistent
     """
-    
+
     # === Entity Patterns ===
     ENTITY_PATTERNS = {
         "COMPONENT": [
@@ -38,6 +52,7 @@ class GraphBuilder:
             (r"\bGPON\b", "GPON"),
             (r"\bXGS-PON\b", "XGS-PON"),
             (r"\bSplitter\b", "Splitter"),
+            (r"\bSFP\b", "SFP"),
         ],
         "PROTOCOL": [
             (r"\bT-CONT\b", "T-CONT"),
@@ -53,13 +68,18 @@ class GraphBuilder:
             (r"\bMGMT\b", "MGMT"),
             (r"\bAES\b", "AES"),
             (r"\bFEC\b", "FEC"),
+            (r"\bBandwidth\s+Profile\b", "Bandwidth Profile"),
+            (r"\bAlloc-ID\b", "Alloc-ID"),
+            (r"\bService\s+Port\b", "Service Port"),
         ],
         "ALARM": [
             (r"\bLOS\b", "LOS"),
             (r"\bLOF\b", "LOF"),
             (r"\bSF\b", "SF"),
             (r"\bSD\b", "SD"),
+            (r"\bSUF\b", "SUF"),
             (r"\bDying[\s_]?Gasp\b", "Dying Gasp"),
+            (r"\bLOM\b", "LOM"),
         ],
         "COMMAND": [
             (r"\bconfigure\s+\w+", "Configure Command"),
@@ -67,7 +87,7 @@ class GraphBuilder:
             (r"\bno\s+\w+", "No Command"),
         ],
     }
-    
+
     # === Relationship Patterns ===
     RELATIONSHIP_PATTERNS = [
         (r"(\w+)\s+(?:is\s+)?connect(?:ed|s)?\s+(?:to|with)\s+(\w+)", "CONNECTS_TO"),
@@ -77,245 +97,187 @@ class GraphBuilder:
         (r"(\w+)\s+(?:causes?|triggers?)\s+(\w+)", "CAUSES"),
         (r"(\w+)\s+(?:supports?|enables?)\s+(\w+)", "ENABLES"),
     ]
-    
+
+    # Canonical name sets for routing to the correct Neo4j node label
+    _ALARM_NAMES = {"LOS", "LOF", "SF", "SD", "SUF", "Dying Gasp", "LOM"}
+    _ENTITY_NAMES = {"ONT", "ONU", "OLT", "ISAM", "PON", "GPON",
+                     "XGS-PON", "Splitter", "SFP"}
+
     def __init__(self):
-        """Initialize graph builder."""
-        import networkx as nx
-        self.graph = nx.DiGraph()
+        """Initialize graph builder – connects to Neo4j."""
+        self._conn = get_connection()
+        if not self._conn.connected:
+            self._conn.connect()
+
+        ensure_schema(self._conn)
+
         self._entity_cache: Set[str] = set()
-        
+        self._counts = {
+            "concepts": 0, "alarms": 0, "entities": 0,
+            "documents": 0, "relationships": 0,
+        }
+
         # Compile patterns
         self._entity_compiled = {}
         for entity_type, patterns in self.ENTITY_PATTERNS.items():
             self._entity_compiled[entity_type] = [
                 (re.compile(p, re.IGNORECASE), name) for p, name in patterns
             ]
-        
+
         self._rel_compiled = [
-            (re.compile(p, re.IGNORECASE), rel_type) 
+            (re.compile(p, re.IGNORECASE), rel_type)
             for p, rel_type in self.RELATIONSHIP_PATTERNS
         ]
-    
+
+    # -----------------------------------------------------------------
+    # Extraction
+    # -----------------------------------------------------------------
+
     def extract_entities(self, text: str) -> List[Tuple[str, str]]:
-        """
-        Extract entities from text.
-        
-        Args:
-            text: Text to extract from.
-            
-        Returns:
-            List of (entity_name, entity_type) tuples.
-        """
+        """Extract entities from text. Returns [(name, category_type)]."""
         entities = []
-        
         for entity_type, patterns in self._entity_compiled.items():
             for pattern, name in patterns:
                 if pattern.search(text):
                     entities.append((name, entity_type))
-        
         return list(set(entities))
-    
+
     def extract_relationships(
-        self, 
-        text: str, 
-        known_entities: Set[str]
+        self, text: str, known_entities: Set[str]
     ) -> List[Tuple[str, str, str]]:
-        """
-        Extract relationships from text.
-        
-        Args:
-            text: Text to extract from.
-            known_entities: Set of known entity names for filtering.
-            
-        Returns:
-            List of (source, target, relationship_type) tuples.
-        """
+        """Extract relationships from text."""
         relationships = []
-        
         for pattern, rel_type in self._rel_compiled:
             for match in pattern.finditer(text):
                 source = match.group(1).strip()
                 target = match.group(2).strip()
-                
-                # Only include if at least one is a known entity
                 if source in known_entities or target in known_entities:
                     relationships.append((source, target, rel_type))
-        
         return relationships
-    
+
+    # -----------------------------------------------------------------
+    # Persistence helpers
+    # -----------------------------------------------------------------
+
+    def _persist_entity(self, name: str, entity_type: str, source_page: int = 0):
+        """Write a single entity to Neo4j based on its type."""
+        if name in self._ALARM_NAMES:
+            if create_alarm(self._conn, name, "unknown"):
+                self._counts["alarms"] += 1
+        elif name in self._ENTITY_NAMES:
+            if create_entity(self._conn, name, entity_type.lower()):
+                self._counts["entities"] += 1
+        else:
+            if create_concept(self._conn, name, entity_type.lower()):
+                self._counts["concepts"] += 1
+        self._entity_cache.add(name)
+
+    def _persist_relationship(self, source: str, target: str, rel_type: str):
+        """Write a relationship to Neo4j."""
+        if source in self._ALARM_NAMES and target in self._ENTITY_NAMES:
+            link_alarm_to_entity(self._conn, source, target)
+        elif source in self._ALARM_NAMES:
+            link_alarm_to_concept(self._conn, source, target)
+        elif rel_type == "PART_OF" and source in self._ENTITY_NAMES and target in self._ENTITY_NAMES:
+            link_entity_part_of(self._conn, source, target)
+        else:
+            relate_concepts(self._conn, source, target)
+        self._counts["relationships"] += 1
+
+    # -----------------------------------------------------------------
+    # Public add helpers (kept for API compatibility)
+    # -----------------------------------------------------------------
+
     def add_entity(self, name: str, entity_type: str, **attributes):
-        """
-        Add an entity node to the graph.
-        
-        Args:
-            name: Entity name.
-            entity_type: Entity type.
-            **attributes: Additional node attributes.
-        """
-        if name not in self.graph:
-            self.graph.add_node(name, type=entity_type, **attributes)
-            self._entity_cache.add(name)
-            logger.debug(f"Added entity: {name} ({entity_type})")
-    
-    def add_relationship(
-        self, 
-        source: str, 
-        target: str, 
-        rel_type: str,
-        **attributes
-    ):
-        """
-        Add a relationship edge to the graph.
-        
-        Args:
-            source: Source entity name.
-            target: Target entity name.
-            rel_type: Relationship type.
-            **attributes: Additional edge attributes.
-        """
-        # Ensure both nodes exist
-        if source not in self.graph:
+        """Add an entity node to Neo4j."""
+        self._persist_entity(name, entity_type, source_page=attributes.get("source_page", 0))
+        logger.debug(f"Added entity: {name} ({entity_type})")
+
+    def add_relationship(self, source: str, target: str, rel_type: str, **attributes):
+        """Add a relationship to Neo4j."""
+        if source not in self._entity_cache:
             self.add_entity(source, "UNKNOWN")
-        if target not in self.graph:
+        if target not in self._entity_cache:
             self.add_entity(target, "UNKNOWN")
-        
-        self.graph.add_edge(source, target, type=rel_type, **attributes)
+        self._persist_relationship(source, target, rel_type)
         logger.debug(f"Added relationship: {source} -[{rel_type}]-> {target}")
-    
-    def process_chunk(self, chunk: ChunkData):
-        """
-        Process a single chunk and extract entities/relationships.
-        
-        Args:
-            chunk: ChunkData to process.
-        """
-        # Extract entities
+
+    # -----------------------------------------------------------------
+    # Chunk processing
+    # -----------------------------------------------------------------
+
+    def process_chunk(self, chunk: ChunkData, doc_id: str = ""):
+        """Process a single chunk – extract, persist, link to document."""
         entities = self.extract_entities(chunk.text)
         for name, entity_type in entities:
-            self.add_entity(name, entity_type, source_page=chunk.page_number)
-        
-        # Extract relationships
+            self._persist_entity(name, entity_type, source_page=chunk.page_number)
+
+        # Link entities/concepts to their source document page
+        if doc_id:
+            for name, entity_type in entities:
+                if name not in self._ALARM_NAMES:
+                    link_concept_to_document(self._conn, name, doc_id, chunk.page_number)
+                    self._counts["documents"] += 1
+
+        # Extract & persist relationships
         entity_names = {e[0] for e in entities}
         relationships = self.extract_relationships(chunk.text, entity_names)
         for source, target, rel_type in relationships:
-            self.add_relationship(source, target, rel_type)
-    
-    def process_chunks(self, chunks: List[ChunkData], show_progress: bool = True):
-        """
-        Process multiple chunks.
-        
-        Args:
-            chunks: List of ChunkData to process.
-            show_progress: Whether to log progress.
-        """
+            if source not in self._entity_cache:
+                self._persist_entity(source, "UNKNOWN")
+            if target not in self._entity_cache:
+                self._persist_entity(target, "UNKNOWN")
+            self._persist_relationship(source, target, rel_type)
+
+    def process_chunks(
+        self,
+        chunks: List[ChunkData],
+        doc_id: str = "unknown_doc",
+        show_progress: bool = True,
+    ):
+        """Process multiple chunks."""
         if show_progress:
-            logger.info(f"Processing {len(chunks)} chunks for graph extraction...")
-        
+            logger.info(f"Processing {len(chunks)} chunks for Neo4j graph extraction...")
+
         for i, chunk in enumerate(chunks):
-            self.process_chunk(chunk)
-            
+            self.process_chunk(chunk, doc_id=doc_id)
+
             if show_progress and (i + 1) % 100 == 0:
-                logger.info(f"Processed {i + 1}/{len(chunks)} chunks")
-        
+                logger.info(f"  Processed {i + 1}/{len(chunks)} chunks")
+
         if show_progress:
+            stats = self.get_stats()
             logger.info(
                 f"Graph extraction complete. "
-                f"Nodes: {self.graph.number_of_nodes()}, "
-                f"Edges: {self.graph.number_of_edges()}"
+                f"Nodes: {stats['total_nodes']}, Rels: {stats['total_relationships']}"
             )
-    
+
     def add_predefined_relationships(self):
-        """Add known Nokia-specific relationships."""
-        # Core GPON hierarchy
-        hierarchy = [
-            ("OLT", "PON", "CONTAINS"),
-            ("PON", "ONT", "CONNECTS_TO"),
-            ("ONT", "GEM", "USES"),
-            ("ONT", "T-CONT", "USES"),
-            ("T-CONT", "DBA", "MANAGED_BY"),
-            ("GEM", "QoS", "APPLIES"),
-        ]
-        
-        for source, target, rel_type in hierarchy:
-            if source in self._entity_cache or target in self._entity_cache:
-                self.add_relationship(source, target, rel_type)
-        
-        # Alarm relationships
-        alarm_rels = [
-            ("LOS", "ONT", "AFFECTS"),
-            ("LOF", "PON", "AFFECTS"),
-            ("Dying Gasp", "ONT", "INDICATES"),
-        ]
-        
-        for alarm, target, rel_type in alarm_rels:
-            if alarm in self._entity_cache:
-                self.add_relationship(alarm, target, rel_type)
-    
-    def save(self, path: str, backup: bool = True):
-        """
-        Save graph to GML file.
-        
-        Args:
-            path: Output path.
-            backup: Whether to backup existing file.
-        """
-        import networkx as nx
-        
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        
-        if backup and path.exists():
-            backup_path = path.with_suffix('.gml.backup')
-            import shutil
-            shutil.copy2(path, backup_path)
-            logger.info(f"Backed up existing graph to {backup_path}")
-        
-        nx.write_gml(self.graph, str(path))
-        logger.info(
-            f"Saved graph ({self.graph.number_of_nodes()} nodes, "
-            f"{self.graph.number_of_edges()} edges) to {path}"
-        )
-    
+        """Seed foundational GPON domain knowledge into Neo4j."""
+        seed_gpon_knowledge(self._conn)
+
+    # -----------------------------------------------------------------
+    # Stats / save  (save is a no-op; Neo4j is already persistent)
+    # -----------------------------------------------------------------
+
+    def save(self, path: str = "", backup: bool = True):
+        """No-op.  Neo4j persists automatically.  Kept for API compatibility."""
+        logger.info("[GraphBuilder] Data already persisted in Neo4j (no file save needed)")
+
     @classmethod
-    def load(cls, path: str) -> 'GraphBuilder':
-        """
-        Load graph from GML file.
-        
-        Args:
-            path: Path to GML file.
-            
-        Returns:
-            GraphBuilder instance.
-        """
-        import networkx as nx
-        
-        builder = cls()
-        builder.graph = nx.read_gml(str(path))
-        builder._entity_cache = set(builder.graph.nodes())
-        
-        logger.info(f"Loaded graph with {builder.graph.number_of_nodes()} nodes")
-        
-        return builder
-    
+    def load(cls, path: str = "") -> "GraphBuilder":
+        """Return a new builder connected to the existing Neo4j graph."""
+        return cls()
+
     def get_stats(self) -> Dict:
-        """Get graph statistics."""
+        """Get graph statistics from Neo4j."""
+        neo_stats = neo4j_get_graph_stats(self._conn)
         return {
-            "nodes": self.graph.number_of_nodes(),
-            "edges": self.graph.number_of_edges(),
-            "node_types": self._count_by_attribute("type", nodes=True),
-            "edge_types": self._count_by_attribute("type", nodes=False),
+            "nodes": neo_stats.get("total_nodes", 0),
+            "edges": neo_stats.get("total_relationships", 0),
+            "total_nodes": neo_stats.get("total_nodes", 0),
+            "total_relationships": neo_stats.get("total_relationships", 0),
+            "node_types": neo_stats.get("nodes_by_label", {}),
+            "edge_types": neo_stats.get("relationships_by_type", {}),
+            "ingestion_counts": self._counts,
         }
-    
-    def _count_by_attribute(self, attr: str, nodes: bool = True) -> Dict[str, int]:
-        """Count elements by attribute value."""
-        from collections import defaultdict
-        counts = defaultdict(int)
-        
-        if nodes:
-            for _, data in self.graph.nodes(data=True):
-                counts[data.get(attr, "UNKNOWN")] += 1
-        else:
-            for _, _, data in self.graph.edges(data=True):
-                counts[data.get(attr, "UNKNOWN")] += 1
-        
-        return dict(counts)
